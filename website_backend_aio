@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import sqlite3
 import stripe 
 
+stripe.api_key = "your_stripe_secret_key"
 
 
 class UserType(Enum):
@@ -23,3 +24,631 @@ class Domain(Enum):
 VERIFICATION_FEE = 5.00  # $5 for entrepreneur verification
 INVESTOR_COMMISSION = 0.05  # 5% commission on investor connections
 DEVELOPER_CONNECTION_FEE = 25.00  # $25 for developers to connect with entrepreneurs
+@dataclass
+class User:
+    id: str
+    username: str
+    email: str
+    user_type: UserType
+    created_at: datetime
+    is_verified: bool = False
+    verification_date: Optional[datetime] = None
+    payment_info: Dict = None
+    
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())
+        if not self.created_at:
+            self.created_at = datetime.now()
+        if not self.payment_info:
+            self.payment_info = {}
+
+@dataclass
+class Entrepreneur(User):
+    ideas: List["Idea"] = None
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if self.ideas is None:
+            self.ideas = []
+        self.user_type = UserType.ENTREPRENEUR
+    
+    def verify(self, payment_id: str) -> bool:
+        """Verify entrepreneur profile after payment confirmation"""
+        # Process payment
+        try:
+            payment = Payment.process_payment(
+                user_id=self.id,
+                amount=VERIFICATION_FEE,
+                payment_id=payment_id,
+                payment_type="verification"
+            )
+            if payment.status == "succeeded":
+                self.is_verified = True
+                self.verification_date = datetime.now()
+                return True
+        except Exception as e:
+            print(f"Verification payment failed: {e}")
+        return False
+    
+    def add_idea(self, idea: "Idea") -> bool:
+        """Add a new idea to entrepreneur's portfolio"""
+        self.ideas.append(idea)
+        idea.entrepreneur_id = self.id
+        return True
+
+@dataclass
+class Investor(User):
+    portfolio: List[str] = None  # List of idea IDs they've invested in
+    certified_ideas: List[str] = None  # List of idea IDs they've certified
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if self.portfolio is None:
+            self.portfolio = []
+        if self.certified_ideas is None:
+            self.certified_ideas = []
+        self.user_type = UserType.INVESTOR
+    
+    def certify_idea(self, idea_id: str) -> bool:
+        """Certify an idea (swipe right)"""
+        self.certified_ideas.append(idea_id)
+        idea = IdeaRepository.get_by_id(idea_id)
+        if idea:
+            idea.add_certification(self.id)
+            return True
+        return False
+    
+    def contact_entrepreneur(self, idea_id: str, payment_id: str) -> bool:
+        """Contact entrepreneur after commission payment"""
+        idea = IdeaRepository.get_by_id(idea_id)
+        if not idea:
+            return False
+        
+        entrepreneur = UserRepository.get_by_id(idea.entrepreneur_id)
+        if not entrepreneur:
+            return False
+        
+        # Calculate commission
+        # This could be a fixed fee or percentage of potential investment
+        commission_amount = INVESTOR_COMMISSION * 1000  # Example: 5% of $1000
+        
+        # Process payment
+        try:
+            payment = Payment.process_payment(
+                user_id=self.id,
+                amount=commission_amount,
+                payment_id=payment_id,
+                payment_type="investor_commission",
+                reference_id=idea_id
+            )
+            if payment.status == "succeeded":
+                # Create connection between investor and entrepreneur
+                connection = Connection(
+                    investor_id=self.id,
+                    entrepreneur_id=entrepreneur.id,
+                    idea_id=idea_id,
+                    status="initiated"
+                )
+                ConnectionRepository.save(connection)
+                return True
+        except Exception as e:
+            print(f"Commission payment failed: {e}")
+        return False
+
+@dataclass
+class Developer(User):
+    skills: List[str] = None
+    interested_ideas: List[str] = None
+    current_projects: List[str] = None
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if self.skills is None:
+            self.skills = []
+        if self.interested_ideas is None:
+            self.interested_ideas = []
+        if self.current_projects is None:
+            self.current_projects = []
+        self.user_type = UserType.DEVELOPER
+    
+    def show_interest(self, idea_id: str) -> bool:
+        """Show interest in an idea (swipe right)"""
+        self.interested_ideas.append(idea_id)
+        return True
+    
+    def contact_entrepreneur(self, idea_id: str, payment_id: str) -> bool:
+        """Contact entrepreneur after paying connection fee"""
+        idea = IdeaRepository.get_by_id(idea_id)
+        if not idea:
+            return False
+        
+        entrepreneur = UserRepository.get_by_id(idea.entrepreneur_id)
+        if not entrepreneur:
+            return False
+        
+        # Process payment
+        try:
+            payment = Payment.process_payment(
+                user_id=self.id,
+                amount=DEVELOPER_CONNECTION_FEE,
+                payment_id=payment_id,
+                payment_type="developer_connection",
+                reference_id=idea_id
+            )
+            if payment.status == "succeeded":
+                # Create connection
+                connection = Connection(
+                    developer_id=self.id,
+                    entrepreneur_id=entrepreneur.id,
+                    idea_id=idea_id,
+                    status="initiated"
+                )
+                ConnectionRepository.save(connection)
+                return True
+        except Exception as e:
+            print(f"Developer connection payment failed: {e}")
+        return False
+
+@dataclass
+class Idea:
+    id: str
+    title: str
+    description: str
+    domain: Domain
+    entrepreneur_id: str
+    created_at: datetime
+    certifications: List[str] = None  # List of investor IDs who certified
+    interested_developers: List[str] = None  # List of developer IDs who swiped right
+    
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())
+        if not self.created_at:
+            self.created_at = datetime.now()
+        if self.certifications is None:
+            self.certifications = []
+        if self.interested_developers is None:
+            self.interested_developers = []
+    
+    def add_certification(self, investor_id: str) -> bool:
+        """Add an investor certification to the idea"""
+        if investor_id not in self.certifications:
+            self.certifications.append(investor_id)
+            return True
+        return False
+    
+    def add_interested_developer(self, developer_id: str) -> bool:
+        """Add a developer who's interested in the idea"""
+        if developer_id not in self.interested_developers:
+            self.interested_developers.append(developer_id)
+            return True
+        return False
+    
+    @property
+    def is_entrepreneur_verified(self) -> bool:
+        """Check if the entrepreneur who posted this idea is verified"""
+        entrepreneur = UserRepository.get_by_id(self.entrepreneur_id)
+        return entrepreneur.is_verified if entrepreneur else False
+    
+    @property
+    def certification_count(self) -> int:
+        """Get the number of investor certifications"""
+        return len(self.certifications)
+
+@dataclass
+class Connection:
+    id: str = None
+    entrepreneur_id: str = None
+    investor_id: str = None
+    developer_id: str = None
+    idea_id: str = None
+    status: str = "pending"  # pending, accepted, rejected, completed
+    created_at: datetime = None
+    
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())
+        if not self.created_at:
+            self.created_at = datetime.now()
+
+@dataclass
+class Payment:
+    id: str
+    user_id: str
+    amount: float
+    payment_type: str  # verification, investor_commission, developer_connection
+    status: str  # pending, succeeded, failed
+    reference_id: Optional[str] = None  # idea_id or other reference
+    created_at: datetime = None
+    
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())
+        if not self.created_at:
+            self.created_at = datetime.now()
+    
+    @staticmethod
+    def process_payment(user_id: str, amount: float, payment_id: str, payment_type: str, reference_id: str = None) -> "Payment":
+        """Process a payment through Stripe"""
+        try:
+            # In a real app, this would use the Stripe API to process the payment
+            # For demonstration, we'll simulate a successful payment
+            payment = Payment(
+                id=payment_id,
+                user_id=user_id,
+                amount=amount,
+                payment_type=payment_type,
+                status="succeeded",
+                reference_id=reference_id
+            )
+            PaymentRepository.save(payment)
+            return payment
+        except Exception as e:
+            print(f"Payment processing error: {e}")
+            return Payment(
+                id=payment_id,
+                user_id=user_id,
+                amount=amount,
+                payment_type=payment_type,
+                status="failed",
+                reference_id=reference_id
+            )
+
+# ---- REPOSITORIES ----
+
+class UserRepository:
+    @staticmethod
+    def save(user: User) -> bool:
+        """Save user to database"""
+        # Implementation would involve database operations
+        # For demo purposes, we'll just return True
+        print(f"Saving user {user.username} to database")
+        return True
+    
+    @staticmethod
+    def get_by_id(user_id: str) -> Optional[User]:
+        """Get user by ID"""
+        # Database fetch implementation would go here
+        # For now, we'll return a dummy user
+        return None  # In a real app, this would return the user from DB
+    
+    @staticmethod
+    def get_by_email(email: str) -> Optional[User]:
+        """Get user by email"""
+        # Database fetch implementation would go here
+        return None
+
+class IdeaRepository:
+    @staticmethod
+    def save(idea: Idea) -> bool:
+        """Save idea to database"""
+        print(f"Saving idea {idea.title} to database")
+        return True
+    
+    @staticmethod
+    def get_by_id(idea_id: str) -> Optional[Idea]:
+        """Get idea by ID"""
+        # Database fetch implementation
+        return None
+    
+    @staticmethod
+    def get_by_domain(domain: Domain) -> List[Idea]:
+        """Get ideas by domain"""
+        # Database fetch implementation
+        return []
+    
+    @staticmethod
+    def get_by_entrepreneur(entrepreneur_id: str) -> List[Idea]:
+        """Get ideas by entrepreneur"""
+        # Database fetch implementation
+        return []
+
+class ConnectionRepository:
+    @staticmethod
+    def save(connection: Connection) -> bool:
+        """Save connection to database"""
+        print(f"Saving connection to database")
+        return True
+    
+    @staticmethod
+    def get_by_id(connection_id: str) -> Optional[Connection]:
+        """Get connection by ID"""
+        return None
+    
+    @staticmethod
+    def get_by_entrepreneur(entrepreneur_id: str) -> List[Connection]:
+        """Get connections by entrepreneur"""
+        return []
+    
+    @staticmethod
+    def get_by_investor(investor_id: str) -> List[Connection]:
+        """Get connections by investor"""
+        return []
+    
+    @staticmethod
+    def get_by_developer(developer_id: str) -> List[Connection]:
+        """Get connections by developer"""
+        return []
+
+class PaymentRepository:
+    @staticmethod
+    def save(payment: Payment) -> bool:
+        """Save payment to database"""
+        print(f"Saving payment of ${payment.amount} to database")
+        return True
+    
+    @staticmethod
+    def get_by_id(payment_id: str) -> Optional[Payment]:
+        """Get payment by ID"""
+        return None
+    
+    @staticmethod
+    def get_by_user(user_id: str) -> List[Payment]:
+        """Get payments by user"""
+        return []
+
+# ---- DATABASE SETUP ----
+
+def setup_database():
+    """Set up the SQLite database with required tables"""
+    conn = sqlite3.connect('startup_platform.db')
+    cursor = conn.cursor()
+    
+    # Create Users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        user_type TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        is_verified BOOLEAN DEFAULT 0,
+        verification_date TIMESTAMP,
+        payment_info TEXT,
+        skills TEXT,  -- Comma-separated skills for developers
+        additional_info TEXT  -- JSON string for type-specific data
+    )
+    ''')
+    
+    # Create Ideas table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS ideas (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        entrepreneur_id TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (entrepreneur_id) REFERENCES users (id)
+    )
+    ''')
+    
+    # Create Certifications table (for investor swipes)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS certifications (
+        id TEXT PRIMARY KEY,
+        idea_id TEXT NOT NULL,
+        investor_id TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (idea_id) REFERENCES ideas (id),
+        FOREIGN KEY (investor_id) REFERENCES users (id)
+    )
+    ''')
+    
+    # Create Developer Interests table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS developer_interests (
+        id TEXT PRIMARY KEY,
+        idea_id TEXT NOT NULL,
+        developer_id TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (idea_id) REFERENCES ideas (id),
+        FOREIGN KEY (developer_id) REFERENCES users (id)
+    )
+    ''')
+    
+    # Create Connections table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS connections (
+        id TEXT PRIMARY KEY,
+        entrepreneur_id TEXT NOT NULL,
+        investor_id TEXT,
+        developer_id TEXT,
+        idea_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (entrepreneur_id) REFERENCES users (id),
+        FOREIGN KEY (investor_id) REFERENCES users (id),
+        FOREIGN KEY (developer_id) REFERENCES users (id),
+        FOREIGN KEY (idea_id) REFERENCES ideas (id)
+    )
+    ''')
+    
+    # Create Payments table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS payments (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        amount REAL NOT NULL,
+        payment_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reference_id TEXT,
+        created_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# ---- API ROUTES (PSEUDO-CODE) ----
+
+"""
+The following section represents pseudo-code for API routes.
+In a real application, this would be implemented using a framework like Flask or FastAPI.
+"""
+
+def register_user(username, email, password, user_type):
+    """Register a new user"""
+    # Check if email already exists
+    existing_user = UserRepository.get_by_email(email)
+    if existing_user:
+        return {"error": "Email already registered"}
+    
+    # Create appropriate user type
+    if user_type == UserType.ENTREPRENEUR:
+        user = Entrepreneur(id="", username=username, email=email, user_type=user_type, created_at=None)
+    elif user_type == UserType.INVESTOR:
+        user = Investor(id="", username=username, email=email, user_type=user_type, created_at=None)
+    elif user_type == UserType.DEVELOPER:
+        user = Developer(id="", username=username, email=email, user_type=user_type, created_at=None)
+    else:
+        return {"error": "Invalid user type"}
+    
+    # Save user to database
+    success = UserRepository.save(user)
+    if success:
+        return {"message": "User registered successfully", "user_id": user.id}
+    else:
+        return {"error": "Failed to register user"}
+
+def create_idea(entrepreneur_id, title, description, domain):
+    """Create a new idea"""
+    # Validate entrepreneur
+    entrepreneur = UserRepository.get_by_id(entrepreneur_id)
+    if not entrepreneur or entrepreneur.user_type != UserType.ENTREPRENEUR:
+        return {"error": "Invalid entrepreneur ID"}
+    
+    # Validate domain
+    try:
+        domain_enum = Domain(domain)
+    except ValueError:
+        return {"error": "Invalid domain"}
+    
+    # Create idea
+    idea = Idea(
+        id="",
+        title=title,
+        description=description,
+        domain=domain_enum,
+        entrepreneur_id=entrepreneur_id,
+        created_at=None
+    )
+    
+    # Save idea
+    success = IdeaRepository.save(idea)
+    if success:
+        # Add idea to entrepreneur's ideas
+        entrepreneur.add_idea(idea)
+        UserRepository.save(entrepreneur)
+        return {"message": "Idea created successfully", "idea_id": idea.id}
+    else:
+        return {"error": "Failed to create idea"}
+
+def verify_entrepreneur(entrepreneur_id, payment_id):
+    """Verify an entrepreneur after payment"""
+    entrepreneur = UserRepository.get_by_id(entrepreneur_id)
+    if not entrepreneur or entrepreneur.user_type != UserType.ENTREPRENEUR:
+        return {"error": "Invalid entrepreneur ID"}
+    
+    success = entrepreneur.verify(payment_id)
+    if success:
+        UserRepository.save(entrepreneur)
+        return {"message": "Entrepreneur verified successfully"}
+    else:
+        return {"error": "Verification failed"}
+
+def investor_swipe_idea(investor_id, idea_id, direction):
+    """Handle investor swipe on an idea"""
+    investor = UserRepository.get_by_id(investor_id)
+    if not investor or investor.user_type != UserType.INVESTOR:
+        return {"error": "Invalid investor ID"}
+    
+    idea = IdeaRepository.get_by_id(idea_id)
+    if not idea:
+        return {"error": "Invalid idea ID"}
+    
+    if direction == "right":
+        # Investor liked the idea
+        success = investor.certify_idea(idea_id)
+        if success:
+            UserRepository.save(investor)
+            IdeaRepository.save(idea)
+            return {"message": "Idea certified successfully"}
+        else:
+            return {"error": "Failed to certify idea"}
+    else:
+        # Investor didn't like the idea - just log the interaction
+        return {"message": "Swipe recorded"}
+
+def developer_swipe_idea(developer_id, idea_id, direction):
+    """Handle developer swipe on an idea"""
+    developer = UserRepository.get_by_id(developer_id)
+    if not developer or developer.user_type != UserType.DEVELOPER:
+        return {"error": "Invalid developer ID"}
+    
+    idea = IdeaRepository.get_by_id(idea_id)
+    if not idea:
+        return {"error": "Invalid idea ID"}
+    
+    if direction == "right":
+        # Developer interested in the idea
+        success = developer.show_interest(idea_id)
+        if success:
+            idea.add_interested_developer(developer_id)
+            UserRepository.save(developer)
+            IdeaRepository.save(idea)
+            return {"message": "Interest recorded successfully"}
+        else:
+            return {"error": "Failed to record interest"}
+    else:
+        # Developer not interested - just log the interaction
+        return {"message": "Swipe recorded"}
+
+def get_ideas_for_swiping(user_id):
+    """Get ideas for a user to swipe on"""
+    user = UserRepository.get_by_id(user_id)
+    if not user:
+        return {"error": "Invalid user ID"}
+    
+    # Logic would vary based on user type and preferences
+    # For now, return all ideas
+    all_ideas = []  # This would fetch from the database
+    
+    return {"ideas": all_ideas}
+
+def initiate_contact(from_id, idea_id, payment_id):
+    """Initiate contact between users"""
+    from_user = UserRepository.get_by_id(from_id)
+    if not from_user:
+        return {"error": "Invalid user ID"}
+    
+    idea = IdeaRepository.get_by_id(idea_id)
+    if not idea:
+        return {"error": "Invalid idea ID"}
+    
+    if from_user.user_type == UserType.INVESTOR:
+        success = from_user.contact_entrepreneur(idea_id, payment_id)
+    elif from_user.user_type == UserType.DEVELOPER:
+        success = from_user.contact_entrepreneur(idea_id, payment_id)
+    else:
+        return {"error": "Invalid user type for initiating contact"}
+    
+    if success:
+        return {"message": "Contact initiated successfully"}
+    else:
+        return {"error": "Failed to initiate contact"}
+
+# ---- MAIN APPLICATION ----
+
+def main():
+    """Main application entry point"""
+    # Set up database
+    setup_database()
+    
+    # In a real application, this would start a web server
+    print("Startup Platform Backend initialized")
+
+if __name__ == "__main__":
+    main()
