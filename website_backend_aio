@@ -6,3 +6,20 @@ from dataclasses import dataclass
 import sqlite3
 import stripe 
 
+
+
+class UserType(Enum):
+    ENTREPRENEUR = "entrepreneur"
+    INVESTOR = "investor"
+    DEVELOPER = "developer"
+
+class Domain(Enum):
+    FINTECH = "fintech"
+    AGRITECH = "agritech"
+    HEALTHTECH = "healthtech"
+    EDTECH = "edtech"
+    OPEN_INNOVATION = "open_innovation"
+
+VERIFICATION_FEE = 5.00  # $5 for entrepreneur verification
+INVESTOR_COMMISSION = 0.05  # 5% commission on investor connections
+DEVELOPER_CONNECTION_FEE = 25.00  # $25 for developers to connect with entrepreneurs
